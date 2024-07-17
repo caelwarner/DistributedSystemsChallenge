@@ -65,12 +65,13 @@ pub struct InitOk {
     pub _marker: PhantomData<bool>,
 }
 
+pub type NodeId = String;
 pub type MessageHandler<S, P> = fn(&mut Node<'_, S, P>, Message<P>) -> Result<()>;
 
 #[derive(Debug)]
 pub struct Node<'a, S, P> {
-    pub node_id: String,
-    pub node_ids: Vec<String>,
+    pub node_id: NodeId,
+    pub node_ids: Vec<NodeId>,
     pub state: S,
     handler: MessageHandler<S, P>,
     stdout: StdoutLock<'a>,

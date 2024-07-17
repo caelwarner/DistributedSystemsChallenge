@@ -18,3 +18,7 @@ path = "src/challenges/echo.rs"
 [[bin]]
 name = "unique_ids"
 path = "src/challenges/unique_ids.rs"
+
+[[bin]]
+name = "broadcast"
+path = "src/challenges/broadcast.rs"
