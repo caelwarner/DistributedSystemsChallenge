@@ -1,9 +1,19 @@
-use color_eyre::Result;
 use std::fmt::Debug;
-use std::io::{BufRead, StdoutLock, Write};
+use std::future::Future;
+use std::io::{BufRead, Write};
+use std::io;
 use std::marker::PhantomData;
+use std::ops::Deref;
+use std::sync::{Arc, RwLock};
+use std::time::Duration;
+
+use color_eyre::eyre::{ErrReport, eyre, Result};
+use color_eyre::Report;
+use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
+use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::task::JoinSet;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message<P> {
@@ -66,59 +76,194 @@ pub struct InitOk {
 }
 
 pub type NodeId = String;
-pub type MessageHandler<S, P> = fn(&mut Node<'_, S, P>, Message<P>) -> Result<()>;
+pub type MessageReply<P> = Result<Option<Message<P>>>;
+type MessageHandler<S, P> = Box<dyn Fn(Node<S, P>, Message<P>) -> BoxFuture<'static, MessageReply<P>> + Send + Sync>;
+type TaskHandler<S, P> = Box<dyn Fn(Node<S, P>) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
-#[derive(Debug)]
-pub struct Node<'a, S, P> {
-    pub node_id: NodeId,
-    pub node_ids: Vec<NodeId>,
-    pub state: S,
-    handler: MessageHandler<S, P>,
-    stdout: StdoutLock<'a>,
+pub struct Task<S, P> {
+    handler: TaskHandler<S, P>,
+    period: Duration,
 }
 
-impl<S, P> Node<'_, S, P>
-    where P: Serialize + DeserializeOwned,
-{
-    pub fn new(state: S, handler: MessageHandler<S, P>) -> Result<Self>
-    {
-        let mut stdin = std::io::stdin().lock();
-        let mut stdout = std::io::stdout().lock();
+pub struct NodeInner<S, P> {
+    pub node_id: NodeId,
+    pub node_ids: Vec<NodeId>,
+    pub state: RwLock<S>,
+    handler: MessageHandler<S, P>,
+    message_channel_tx: Sender<Message<P>>,
+}
 
-        let mut line = String::new();
-        stdin.read_line(&mut line)?;
+pub struct Node<S, P> {
+    inner: Arc<NodeInner<S, P>>,
+}
 
-        let init_message = serde_json::from_str::<Message<Init>>(&line)?;
-        let (init_message, payload) = init_message.take_payload();
-
-        let init_ok_message = init_message.into_reply(InitOk::default());
-        serde_json::to_writer(&mut stdout, &init_ok_message)?;
-        stdout.write_all(b"\n")?;
-
-        Ok(Self {
-            node_id: payload.node_id,
-            node_ids: payload.node_ids,
-            state,
-            handler,
-            stdout,
-        })
+impl<S, P> Clone for Node<S, P> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
     }
+}
 
-    pub fn run(mut self) -> Result<()> {
-        for line in std::io::stdin().lock().lines() {
-            let line = line?;
+impl<S, P> Deref for Node<S, P> {
+    type Target = Arc<NodeInner<S, P>>;
 
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl<S, P> Node<S, P>
+where
+    S: Send + Sync + 'static,
+    P: Serialize + DeserializeOwned + Clone + Send + 'static,
+{
+    async fn serve(
+        self,
+        mut message_channel_rx: Receiver<Message<P>>,
+        tasks: Vec<Task<S, P>>,
+    ) -> Result<()> {
+        let mut set = JoinSet::new();
+
+        set.spawn(async move {
+            while let Some(message) = message_channel_rx.recv().await {
+                let mut stdout = io::stdout().lock();
+
+                serde_json::to_writer(&mut stdout, &message)?;
+                stdout.write_all(b"\n")?;
+            }
+
+            Ok::<_, Report>(())
+        });
+
+        for task in tasks {
+            let node = self.clone();
+            set.spawn(async move {
+                loop {
+                    tokio::time::sleep(task.period).await;
+                    (task.handler)(node.clone()).await?;
+                }
+
+                #[allow(unreachable_code)]
+                Ok::<_, Report>(())
+            });
+        }
+
+        let stdin = io::stdin();
+        let mut line = String::new();
+
+        while let Ok(_) = stdin.read_line(&mut line) {
             let message = serde_json::from_str::<Message<P>>(&line)?;
-            (self.handler)(&mut self, message)?;
+            let node = self.clone();
+
+            set.spawn(async move {
+                let reply = (node.handler)(node.clone(), message).await?;
+
+                if let Some(reply) = reply {
+                    node.message_channel_tx.send(reply)
+                        .await
+                        .map_err(|_| eyre!("Failed to send message via message_channel"))?;
+                }
+
+                Ok::<_, ErrReport>(())
+            });
+
+            line.clear();
+        }
+
+        while let Some(res) = set.join_next().await {
+            res??;
         }
 
         Ok(())
     }
 
-    pub fn send(&mut self, message: &Message<P>) -> Result<()> {
-        serde_json::to_writer(&mut self.stdout, &message)?;
-        self.stdout.write_all(b"\n")?;
+    pub async fn send_new_message(&self, dest: String, payload: P) -> Result<()> {
+        let message = Message {
+            src: self.node_id.clone(),
+            dest,
+            body: MessageBody {
+                message_id: None,
+                in_reply_to: None,
+                payload,
+            },
+        };
+
+        self.message_channel_tx.send(message)
+            .await
+            .map_err(|_| eyre!("Failed to send message via message_channel"))?;
 
         Ok(())
+    }
+}
+
+pub struct NodeServer<S, P> {
+    state: S,
+    handler: MessageHandler<S, P>,
+    tasks: Vec<Task<S, P>>,
+}
+
+impl<S, P> NodeServer<S, P>
+where
+    S: Send + Sync + 'static,
+    P: Serialize + DeserializeOwned + Clone + Send + 'static,
+{
+    pub fn new<H, Fut>(state: S, handler: H) -> Self
+    where
+        H: Fn(Node<S, P>, Message<P>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = MessageReply<P>> + Send + 'static,
+    {
+        Self {
+            state,
+            handler: Box::new(move |node, message| Box::pin(handler(node, message))),
+            tasks: Vec::new(),
+        }
+    }
+
+    pub fn add_task<H, Fut>(mut self, task: H, period: Duration) -> Self
+    where
+        H: Fn(Node<S, P>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<()>> + Send + 'static,
+    {
+        self.tasks.push(Task {
+            handler: Box::new(move |node| Box::pin(task(node))),
+            period,
+        });
+        self
+    }
+
+    pub async fn serve(self) -> Result<()> {
+        color_eyre::install()?;
+
+        let payload = {
+            let mut stdin = io::stdin().lock();
+            let mut stdout = io::stdout().lock();
+
+            let mut line = String::new();
+            stdin.read_line(&mut line)?;
+
+            let init_message = serde_json::from_str::<Message<Init>>(&line)?;
+            let (init_message, payload) = init_message.take_payload();
+
+            let init_ok_message = init_message.into_reply(InitOk::default());
+            serde_json::to_writer(&mut stdout, &init_ok_message)?;
+            stdout.write_all(b"\n")?;
+
+            payload
+        };
+
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+
+        let node = Node {
+            inner: Arc::new(NodeInner {
+                node_id: payload.node_id,
+                node_ids: payload.node_ids,
+                state: RwLock::new(self.state),
+                handler: self.handler,
+                message_channel_tx: tx,
+            }),
+        };
+
+        node.serve(rx, self.tasks).await
     }
 }

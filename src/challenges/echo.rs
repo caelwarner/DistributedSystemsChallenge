@@ -1,26 +1,25 @@
-use color_eyre::Result;
 use serde::{Deserialize, Serialize};
-use gossip_glomers::{Message, Node};
+use color_eyre::Result;
+use gossip_glomers::{Message, MessageReply, Node, NodeServer};
 
-fn main() -> Result<()> {
-    let node = Node::new((), message_handler)?;
-
-    node.run()
+#[tokio::main]
+async fn main() -> Result<()> {
+    NodeServer::new((), message_handler)
+        .serve()
+        .await
 }
 
-fn message_handler(node: &mut Node<(), Payload>, message: Message<Payload>) -> Result<()> {
+async fn message_handler(_node: Node<(), Payload>, message: Message<Payload>) -> MessageReply<Payload> {
     let (message, payload) = message.take_payload();
 
-    match payload {
+    Ok(match payload {
         Payload::Echo { echo } => {
-            node.send(&message.into_reply(Payload::EchoOk { echo }))?;
+            Some(message.into_reply(Payload::EchoOk { echo }))
         },
         Payload::EchoOk { .. } => {
-            // Do nothing
+            None
         },
-    }
-
-    Ok(())
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

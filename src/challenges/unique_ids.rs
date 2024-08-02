@@ -1,18 +1,19 @@
 use std::time::SystemTime;
-use color_eyre::Result;
 use serde::{Deserialize, Serialize};
-use gossip_glomers::{Message, Node};
+use color_eyre::Result;
+use gossip_glomers::{Message, MessageReply, Node, NodeServer};
 
-fn main() -> Result<()> {
-    let node = Node::new((), message_handler)?;
-
-    node.run()
+#[tokio::main]
+async fn main() -> Result<()> {
+    NodeServer::new((), message_handler)
+        .serve()
+        .await
 }
 
-fn message_handler(node: &mut Node<(), Payload>, message: Message<Payload>) -> Result<()> {
+async fn message_handler(node: Node<(), Payload>, message: Message<Payload>) -> MessageReply<Payload> {
     let (message, payload) = message.take_payload();
 
-    match payload {
+    Ok(match payload {
         Payload::Generate => {
             let time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
 
@@ -22,14 +23,12 @@ fn message_handler(node: &mut Node<(), Payload>, message: Message<Payload>) -> R
                 time.as_nanos(),
             );
 
-            node.send(&message.into_reply(Payload::GenerateOk { id: flake_id }))?;
+            Some(message.into_reply(Payload::GenerateOk { id: flake_id }))
         },
         Payload::GenerateOk { .. } => {
-            // Do nothing
+            None
         },
-    }
-
-    Ok(())
+    })
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
