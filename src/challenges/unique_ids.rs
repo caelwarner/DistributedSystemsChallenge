@@ -1,7 +1,7 @@
 use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use color_eyre::Result;
-use gossip_glomers::{Message, MessageReply, Node, NodeServer};
+use distributed_systems_challenge::{Message, MessageReply, Node, NodeServer};
 
 #[tokio::main]
 async fn main() -> Result<()> {

@@ -90,6 +90,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "distributed_systems_challenge"
+version = "0.1.0"
+dependencies = [
+ "color-eyre",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "eyre"
 version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -193,17 +204,6 @@ name = "gimli"
 version = "0.28.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4271d37baee1b8c7e4b708028c57d816cf9d2434acb33a549475f78c181f6253"
-
-[[package]]
-name = "gossip_glomers"
-version = "0.1.0"
-dependencies = [
- "color-eyre",
- "futures",
- "serde",
- "serde_json",
- "tokio",
-]
 
 [[package]]
 name = "hermit-abi"

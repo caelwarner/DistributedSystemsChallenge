@@ -4,7 +4,7 @@ use std::time::Duration;
 use color_eyre::eyre::{OptionExt, Result};
 use serde::{Deserialize, Serialize};
 
-use gossip_glomers::{Message, MessageReply, Node, NodeId, NodeServer};
+use distributed_systems_challenge::{Message, MessageReply, Node, NodeId, NodeServer};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -32,42 +32,33 @@ async fn message_handler(node: Node<State, Payload>, message: Message<Payload>) 
             let mut state = node.state.write().unwrap();
 
             for neighbour in neighbours {
-                state.neighbours.push(NeighbourState {
-                    id: neighbour,
-                    broadcast_messages: HashSet::new(),
-                });
+                state.neighbours.insert(
+                    neighbour,
+                    HashSet::new(),
+                );
             }
 
             Some(message.into_reply(Payload::TopologyOk))
         },
-        Payload::Sync { broadcast_messages: neighbours_messages } => {
+        Payload::Sync { new_messages } => {
             let mut state = node.state.write().unwrap();
+            let src = message.src.clone();
 
-            let neighbour_index = state.neighbours.iter()
-                .enumerate()
-                .find(|(_, neighbour)| neighbour.id == message.src)
-                .ok_or_eyre("Neighbour missing")?.0;
+            state.neighbours.get_mut(&src)
+                .ok_or_eyre("Unknown neighbour")?
+                .extend(new_messages.clone());
+            state.broadcast_messages.extend(new_messages.clone());
 
-            state.neighbours[neighbour_index].broadcast_messages.extend(neighbours_messages.clone());
-            state.broadcast_messages.extend(neighbours_messages);
-
-            let reply = message.into_reply(Payload::SyncOk {
-                broadcast_messages: state.broadcast_messages.difference(&state.neighbours[neighbour_index].broadcast_messages)
-                    .copied()
-                    .collect()
-            });
+            let reply = message.into_reply(Payload::SyncOk { acknowledge_new_messages: new_messages });
 
             Some(reply)
         },
-        Payload::SyncOk { broadcast_messages } => {
+        Payload::SyncOk { acknowledge_new_messages } => {
             let mut state = node.state.write().unwrap();
 
-            state.neighbours.iter_mut()
-                .find(|neighbour| neighbour.id == message.src)
-                .ok_or_eyre("Neighbour missing")?
-                .broadcast_messages
-                .extend(broadcast_messages.clone());
-            state.broadcast_messages.extend(broadcast_messages);
+            state.neighbours.get_mut(&message.src)
+                .ok_or_eyre("Unknown neighbour")?
+                .extend(acknowledge_new_messages);
 
             None
         },
@@ -79,40 +70,34 @@ async fn message_handler(node: Node<State, Payload>, message: Message<Payload>) 
 
 async fn sync_with_neighbours(node: Node<State, Payload>) -> Result<()> {
     let messages = {
-        let mut state = node.state.write().unwrap();
-        let broadcast_messages = state.broadcast_messages.clone();
+        let state = node.state.read().unwrap();
 
-        state.neighbours.iter_mut()
-            .filter(|neighbour| neighbour.id < node.node_id)
-            .map(|neighbour| {
-                let messages_to_send = broadcast_messages.difference(&neighbour.broadcast_messages)
+        state.neighbours.iter()
+            .map(|(neighbour_id, messages_known)| {
+                let messages_to_send = state.broadcast_messages.difference(&messages_known)
                     .copied()
                     .collect::<HashSet<_>>();
 
-                neighbour.broadcast_messages.extend(messages_to_send.clone());
-
-                (neighbour.id.clone(), messages_to_send)
+                (neighbour_id.clone(), messages_to_send)
             })
+            .filter(|(_, messages_to_send)| !messages_to_send.is_empty())
             .collect::<Vec<_>>()
     };
 
     for (dest, messages_to_send) in messages {
         node.send_new_message(dest, Payload::Sync {
-            broadcast_messages: messages_to_send,
+            new_messages: messages_to_send,
         }).await?;
     }
 
     Ok(())
 }
 
+type MessagesKnown = HashSet<i32>;
+
 #[derive(Default)]
 struct State {
-    neighbours: Vec<NeighbourState>,
-    broadcast_messages: HashSet<i32>,
-}
-
-struct NeighbourState {
-    id: NodeId,
+    neighbours: HashMap<NodeId, MessagesKnown>,
     broadcast_messages: HashSet<i32>,
 }
 
@@ -134,9 +119,9 @@ enum Payload {
     },
     TopologyOk,
     Sync {
-        broadcast_messages: HashSet<i32>,
+        new_messages: HashSet<i32>,
     },
     SyncOk {
-        broadcast_messages: HashSet<i32>,
+        acknowledge_new_messages: HashSet<i32>,
     },
 }
