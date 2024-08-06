@@ -9,7 +9,7 @@ use distributed_systems_challenge::{Message, MessageReply, Node, NodeId, NodeSer
 #[tokio::main]
 async fn main() -> Result<()> {
     NodeServer::new(State::default(), message_handler)
-        .add_task(sync_with_neighbours, Duration::from_millis(450))
+        .add_task(sync_with_neighbours, Duration::from_millis(750))
         .serve()
         .await
 }
