@@ -9,7 +9,7 @@ use distributed_systems_challenge::{Message, MessageReply, Node, NodeId, NodeSer
 #[tokio::main]
 async fn main() -> Result<()> {
     NodeServer::new(State::default(), message_handler)
-        .add_task(sync_with_neighbours, Duration::from_millis(500))
+        .add_task(sync_with_neighbours, Duration::from_millis(450))
         .serve()
         .await
 }
@@ -27,15 +27,20 @@ async fn message_handler(node: Node<State, Payload>, message: Message<Payload>) 
                 broadcast_messages: node.state.read().unwrap().broadcast_messages.clone(),
             }))
         },
-        Payload::Topology { mut topology } => {
-            let neighbours = topology.remove(&node.node_id).ok_or_eyre("Topology missing node of self")?;
+        Payload::Topology { .. } => {
             let mut state = node.state.write().unwrap();
+            // let neighbours = topology.remove(&node.node_id).ok_or_eyre("Topology missing node of self")?;
+            //
+            // for neighbour in neighbours {
+            //     state.neighbours.insert(
+            //         neighbour,
+            //         HashSet::new(),
+            //     );
+            // }
 
-            for neighbour in neighbours {
-                state.neighbours.insert(
-                    neighbour,
-                    HashSet::new(),
-                );
+            // All node communicate with all other nodes for low latency
+            for node in node.node_ids.clone() {
+                state.neighbours.insert(node, HashSet::new());
             }
 
             Some(message.into_reply(Payload::TopologyOk))
