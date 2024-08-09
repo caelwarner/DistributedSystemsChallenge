@@ -7,13 +7,16 @@ use std::ops::Deref;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-use color_eyre::eyre::{ErrReport, eyre, Result};
+use color_eyre::eyre::{eyre, OptionExt, Result};
 use color_eyre::Report;
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use serde::de::DeserializeOwned;
 use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::task::JoinSet;
+use crate::sequential_kv_store::{SEQUENTIAL_KV_STORE_ID, SequentialKVStore, SequentialKVStorePayload};
+
+mod sequential_kv_store;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message<P> {
@@ -89,8 +92,9 @@ pub struct NodeInner<S, P> {
     pub node_id: NodeId,
     pub node_ids: Vec<NodeId>,
     pub state: RwLock<S>,
+    pub seq_kv: SequentialKVStore,
     handler: MessageHandler<S, P>,
-    message_channel_tx: Sender<Message<P>>,
+    message_channel_tx: Sender<String>,
 }
 
 pub struct Node<S, P> {
@@ -120,7 +124,7 @@ where
 {
     async fn serve(
         self,
-        mut message_channel_rx: Receiver<Message<P>>,
+        mut message_channel_rx: Receiver<String>,
         tasks: Vec<Task<S, P>>,
     ) -> Result<()> {
         let mut set = JoinSet::new();
@@ -129,7 +133,7 @@ where
             while let Some(message) = message_channel_rx.recv().await {
                 let mut stdout = io::stdout().lock();
 
-                serde_json::to_writer(&mut stdout, &message)?;
+                stdout.write_all(message.as_bytes())?;
                 stdout.write_all(b"\n")?;
             }
 
@@ -153,22 +157,32 @@ where
         let mut line = String::new();
 
         while let Ok(_) = stdin.read_line(&mut line) {
-            let message = serde_json::from_str::<Message<P>>(&line)?;
+            let value = serde_json::from_str::<serde_json::Value>(&line)?;
+            line.clear();
+
+            if value.get("src").ok_or_eyre("Missing dest field")?.as_str().ok_or_eyre("src field is not a string")? == SEQUENTIAL_KV_STORE_ID {
+                let seq_kv_reply = serde_json::from_value::<Message<SequentialKVStorePayload>>(value)?;
+                self.seq_kv.handle_reply(seq_kv_reply).await?;
+
+                continue;
+            }
+
+            let message = serde_json::from_value::<Message<P>>(value)?;
             let node = self.clone();
 
             set.spawn(async move {
                 let reply = (node.handler)(node.clone(), message).await?;
 
                 if let Some(reply) = reply {
+                    let reply = serde_json::to_string(&reply)?;
+
                     node.message_channel_tx.send(reply)
                         .await
                         .map_err(|_| eyre!("Failed to send message via message_channel"))?;
                 }
 
-                Ok::<_, ErrReport>(())
+                Ok::<_, Report>(())
             });
-
-            line.clear();
         }
 
         while let Some(res) = set.join_next().await {
@@ -188,6 +202,8 @@ where
                 payload,
             },
         };
+
+        let message = serde_json::to_string(&message)?;
 
         self.message_channel_tx.send(message)
             .await
@@ -256,9 +272,10 @@ where
 
         let node = Node {
             inner: Arc::new(NodeInner {
-                node_id: payload.node_id,
+                node_id: payload.node_id.clone(),
                 node_ids: payload.node_ids,
                 state: RwLock::new(self.state),
+                seq_kv: SequentialKVStore::new(payload.node_id, tx.clone()),
                 handler: self.handler,
                 message_channel_tx: tx,
             }),

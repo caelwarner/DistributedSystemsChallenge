@@ -23,3 +23,7 @@ path = "src/challenges/unique_ids.rs"
 [[bin]]
 name = "broadcast"
 path = "src/challenges/broadcast.rs"
+
+[[bin]]
+name = "grow_only_counter"
+path = "src/challenges/grow_only_counter.rs"
