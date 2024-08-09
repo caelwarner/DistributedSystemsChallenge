@@ -27,3 +27,7 @@ path = "src/challenges/broadcast.rs"
 [[bin]]
 name = "grow_only_counter"
 path = "src/challenges/grow_only_counter.rs"
+
+[[bin]]
+name = "kafka"
+path = "src/challenges/kafka.rs"
